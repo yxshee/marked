@@ -1,0 +1,163 @@
+From 5133611b0bc15170ff5133274fd816ec6ef98fa0 Mon Sep 17 00:00:00 2001
+From: yxshee <84263676+yxshee@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 13:58:48 +0000
+Subject: [PATCH] fix(git-diff): run git diff without the user's diff config
+
+color.ui=always put ANSI codes in the output, so the parser found no
+headers and returned no chunks; diff.external made git exit 128; a
+textconv driver made the search index converted text; and
+diff.noprefix / diff.mnemonicPrefix changed the paths. Pass
+--no-color --no-ext-diff --no-textconv and explicit a/ b/ prefixes,
+don't inherit stdin (the MCP stdio stream), and run git with LC_ALL=C
+so the root-commit retry can match its English error.
+
+Closes #470
+---
+ chunkhound/core/git_diff/runner.py | 43 +++++++++++++++++++++---------
+ tests/unit/test_git_diff_runner.py | 42 +++++++++++++++++++++++++++++
+ 2 files changed, 73 insertions(+), 12 deletions(-)
+
+diff --git a/chunkhound/core/git_diff/runner.py b/chunkhound/core/git_diff/runner.py
+index 404f1848..e9898b00 100644
+--- a/chunkhound/core/git_diff/runner.py
++++ b/chunkhound/core/git_diff/runner.py
+@@ -1,4 +1,5 @@
+ import asyncio
++import os
+ import re
+ from pathlib import Path
+ 
+@@ -6,6 +7,19 @@ _SAFE_REF = re.compile(r'^[a-zA-Z0-9_.^~/:@{}\-]+\Z')
+ 
+ _GIT_DIFF_TIMEOUT_SECONDS = 30
+ 
++# The diff parser expects git's plain unified diff with a/ and b/ prefixes.
++# These options override user config that changes that output: color.ui=always
++# (ANSI codes on a pipe), diff.external, textconv drivers (converted text instead
++# of the real change) and diff.noprefix / diff.mnemonicPrefix.
++_GIT_DIFF_OPTIONS = (
++    "--no-color",
++    "--no-ext-diff",
++    "--no-textconv",
++    "--src-prefix=a/",
++    "--dst-prefix=b/",
++)
++
++
+ # SHA1 of git's empty tree — used as the "no parent" base for root commits.
+ _EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+ 
+@@ -16,6 +30,21 @@ _EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+ _SINGLE_COMMIT_RANGE_RE = re.compile(r'^([0-9a-fA-F]{4,64})\^\.\.([0-9a-fA-F]{4,64})\Z')
+ 
+ 
++async def _start_git_diff(
++    commit_range: str, cwd: Path | str
++) -> asyncio.subprocess.Process:
++    return await asyncio.create_subprocess_exec(
++        "git", "diff", commit_range, *_GIT_DIFF_OPTIONS, "--",
++        cwd=str(cwd),
++        # Don't inherit stdin: under MCP stdio it is the JSON-RPC stream.
++        stdin=asyncio.subprocess.DEVNULL,
++        stdout=asyncio.subprocess.PIPE,
++        stderr=asyncio.subprocess.PIPE,
++        # English error messages, so the "unknown revision" check below works.
++        env={**os.environ, "LC_ALL": "C"},
++    )
++
++
+ async def run_git_diff(commit_range: str, cwd: Path | str) -> str:
+     if (
+         not _SAFE_REF.match(commit_range)
+@@ -24,12 +53,7 @@ async def run_git_diff(commit_range: str, cwd: Path | str) -> str:
+         or commit_range.startswith("-")
+     ):
+         raise ValueError(f"Unsafe git ref rejected: {commit_range!r}")
+-    proc = await asyncio.create_subprocess_exec(
+-        "git", "diff", commit_range, "--",
+-        cwd=str(cwd),
+-        stdout=asyncio.subprocess.PIPE,
+-        stderr=asyncio.subprocess.PIPE,
+-    )
++    proc = await _start_git_diff(commit_range, cwd)
+     try:
+         stdout, stderr = await asyncio.wait_for(
+             proc.communicate(), timeout=_GIT_DIFF_TIMEOUT_SECONDS
+@@ -48,12 +72,7 @@ async def run_git_diff(commit_range: str, cwd: Path | str) -> str:
+         m = _SINGLE_COMMIT_RANGE_RE.match(commit_range)
+         if m and m.group(1) == m.group(2) and "unknown revision" in err:
+             root_range = f"{_EMPTY_TREE_SHA}..{m.group(2)}"
+-            proc2 = await asyncio.create_subprocess_exec(
+-                "git", "diff", root_range, "--",
+-                cwd=str(cwd),
+-                stdout=asyncio.subprocess.PIPE,
+-                stderr=asyncio.subprocess.PIPE,
+-            )
++            proc2 = await _start_git_diff(root_range, cwd)
+             try:
+                 stdout2, stderr2 = await asyncio.wait_for(
+                     proc2.communicate(), timeout=_GIT_DIFF_TIMEOUT_SECONDS
+diff --git a/tests/unit/test_git_diff_runner.py b/tests/unit/test_git_diff_runner.py
+index a15e2a7e..2418d1a0 100644
+--- a/tests/unit/test_git_diff_runner.py
++++ b/tests/unit/test_git_diff_runner.py
+@@ -1,10 +1,14 @@
+ """Unit tests for chunkhound.core.git_diff.runner."""
+ import asyncio
++import os
++import shutil
++import subprocess
+ from pathlib import Path
+ from unittest.mock import patch
+ 
+ import pytest
+ 
++from chunkhound.core.git_diff.parser import parse_diff_to_chunks
+ from chunkhound.core.git_diff.runner import run_git_diff
+ 
+ 
+@@ -186,3 +190,41 @@ async def test_non_root_failure_not_retried(tmp_path: Path) -> None:
+             await run_git_diff(f"{HASH}^..{HASH}", tmp_path)
+ 
+     assert call_count == 1  # no retry
++
++
++@pytest.mark.asyncio
++@pytest.mark.skipif(shutil.which("git") is None, reason="git binary required")
++async def test_real_git_ignores_user_diff_config(tmp_path: Path) -> None:
++    """User git config that changes `git diff` output must not reach the parser."""
++    env = {
++        **os.environ,
++        "GIT_AUTHOR_NAME": "test",
++        "GIT_AUTHOR_EMAIL": "test@example.com",
++        "GIT_COMMITTER_NAME": "test",
++        "GIT_COMMITTER_EMAIL": "test@example.com",
++    }
++
++    def git(*args: str) -> None:
++        subprocess.run(["git", *args], cwd=tmp_path, env=env, check=True)
++
++    git("init", "-q")
++    (tmp_path / "notes.txt").write_text("one\n")
++    git("add", "notes.txt")
++    git("commit", "-q", "-m", "first")
++    (tmp_path / "notes.txt").write_text("one\nhello world\n")
++    git("commit", "-q", "-am", "second")
++
++    git("config", "color.ui", "always")
++    git("config", "diff.noprefix", "true")
++    git("config", "diff.upper.textconv", "sed s/hello/CONVERTED/")
++    (tmp_path / ".git" / "info" / "attributes").write_text("*.txt diff=upper\n")
++    git("config", "diff.external", "false")
++
++    raw = await run_git_diff("HEAD~1..HEAD", tmp_path)
++
++    assert "\x1b[" not in raw
++    assert "CONVERTED" not in raw
++    chunks = parse_diff_to_chunks(raw)
++    assert len(chunks) == 1
++    assert chunks[0].file_path == "notes.txt"
++    assert "+hello world" in chunks[0].code
+-- 
+2.43.0
+
