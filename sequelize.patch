@@ -1,0 +1,69 @@
+From 5bb12f0e62d3cddc01eedbad0a1fb0e49f8a85b1 Mon Sep 17 00:00:00 2001
+From: yxshee <84263676+yxshee@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 12:05:35 +0000
+Subject: [PATCH] fix(core): don't validate values interpolated in a sql
+ literal against the attribute type
+
+---
+ .../query-generator-internal.ts               |  5 +++-
+ packages/core/test/unit/sql/where.test.ts     | 25 +++++++++++++++++++
+ 2 files changed, 29 insertions(+), 1 deletion(-)
+
+diff --git a/packages/core/src/abstract-dialect/query-generator-internal.ts b/packages/core/src/abstract-dialect/query-generator-internal.ts
+index e14fe6c..e05aa8f 100644
+--- a/packages/core/src/abstract-dialect/query-generator-internal.ts
++++ b/packages/core/src/abstract-dialect/query-generator-internal.ts
+@@ -340,10 +340,13 @@ export class AbstractQueryGeneratorInternal<Dialect extends AbstractDialect = Ab
+   }
+ 
+   formatLiteral(piece: Literal, options?: EscapeOptions): string {
++    // values interpolated in a literal can be anything, they are not necessarily of the type of the attribute
++    // the literal is compared to, so we need to remove the type from their escape options
++    const partEscapeOptions = options?.type ? { ...options, type: undefined } : options;
+     const sql = piece.val
+       .map(part => {
+         if (part instanceof BaseSqlExpression) {
+-          return this.queryGenerator.formatSqlExpression(part, options);
++          return this.queryGenerator.formatSqlExpression(part, partEscapeOptions);
+         }
+ 
+         return part;
+diff --git a/packages/core/test/unit/sql/where.test.ts b/packages/core/test/unit/sql/where.test.ts
+index 759ff6a..2daad25 100644
+--- a/packages/core/test/unit/sql/where.test.ts
++++ b/packages/core/test/unit/sql/where.test.ts
+@@ -708,6 +708,31 @@ Caused by: "undefined" cannot be escaped`),
+         },
+       );
+ 
++      // values in a literal are not of the type of the attribute it is compared to
++      testSql(
++        { intAttr1: sql`LENGTH(${'abc'})` },
++        {
++          default: `[intAttr1] = LENGTH('abc')`,
++          mssql: `[intAttr1] = LENGTH(N'abc')`,
++        },
++      );
++
++      testSql(
++        { intAttr1: { [Op.gt]: sql`CAST(${'5'} AS INTEGER)` } },
++        {
++          default: `[intAttr1] > CAST('5' AS INTEGER)`,
++          mssql: `[intAttr1] > CAST(N'5' AS INTEGER)`,
++        },
++      );
++
++      testSql(
++        { stringAttr: sql`CONCAT(${'a'}, ${1})` },
++        {
++          default: `[stringAttr] = CONCAT('a', 1)`,
++          mssql: `[stringAttr] = CONCAT(N'a', 1)`,
++        },
++      );
++
+       testSql(
+         { stringAttr: fn('UPPER', col('stringAttr')) },
+         {
+-- 
+2.43.0
+

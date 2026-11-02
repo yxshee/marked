@@ -1,0 +1,86 @@
+From b357a585d2cda701e45be64a7aafe3246896e2be Mon Sep 17 00:00:00 2001
+From: yxshee <84263676+yxshee@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 11:58:39 +0000
+Subject: [PATCH] fix(compositor): don't clip layers that start away from the
+ origin
+
+Render sized the canvas to the bounds' width and height, but the layers
+are drawn at their absolute positions. When no layer sits at (0, 0) the
+canvas was too small and the layers were cut off, or dropped entirely
+for a single offset layer.
+---
+ canvas_test.go | 43 +++++++++++++++++++++++++++++++++++++++++++
+ layer.go       |  6 +++++-
+ 2 files changed, 48 insertions(+), 1 deletion(-)
+
+diff --git a/canvas_test.go b/canvas_test.go
+index b3e2b1a..46c6a02 100644
+--- a/canvas_test.go
++++ b/canvas_test.go
+@@ -59,3 +59,46 @@ func TestCanvasRenderWithTrailingSpaces(t *testing.T) {
+ 		t.Errorf("expected:\n%q\ngot:\n%q", expected, rendered)
+ 	}
+ }
++
++func TestCompositorRenderOffsetLayers(t *testing.T) {
++	tests := []struct {
++		name     string
++		layers   []*Layer
++		expected string
++	}{
++		{
++			name:     "single layer away from the origin",
++			layers:   []*Layer{NewLayer("AAAA").X(2).Y(1)},
++			expected: "\n  AAAA",
++		},
++		{
++			name: "no layer at the origin",
++			layers: []*Layer{
++				NewLayer("Box\nBox").X(3).Y(2),
++				NewLayer("x").X(1).Y(1).Z(1),
++			},
++			expected: strings.Join([]string{
++				"",
++				" x",
++				"   Box",
++				"   Box",
++			}, "\n"),
++		},
++		{
++			name: "layer at the origin",
++			layers: []*Layer{
++				NewLayer("BB"),
++				NewLayer("CC").X(4).Y(2),
++			},
++			expected: "BB\n\n    CC",
++		},
++	}
++
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			if rendered := NewCompositor(tt.layers...).Render(); rendered != tt.expected {
++				t.Errorf("expected:\n%q\ngot:\n%q", tt.expected, rendered)
++			}
++		})
++	}
++}
+diff --git a/layer.go b/layer.go
+index e30d1ef..1c28125 100644
+--- a/layer.go
++++ b/layer.go
+@@ -321,7 +321,11 @@ func (c *Compositor) Refresh() {
+ // function that creates a temporary canvas, draws the compositor onto it, and
+ // returns the resulting string.
+ func (c *Compositor) Render() string {
+-	width, height := c.bounds.Dx(), c.bounds.Dy()
++	// Layers are drawn at their absolute positions, so the canvas has to
++	// reach from the origin to the far edge of the bounds. Sizing it to
++	// the bounds' width and height cuts off layers that don't start at
++	// (0, 0).
++	width, height := max(c.bounds.Max.X, 0), max(c.bounds.Max.Y, 0)
+ 	canvas := NewCanvas(width, height)
+ 	return canvas.Compose(c).Render()
+ }
+-- 
+2.43.0
+

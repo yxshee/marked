@@ -1,0 +1,1 @@
+fix: getKeys maxDepth returns deeper keys from a mount when every driver supports maxDepth natively

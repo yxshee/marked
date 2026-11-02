@@ -1,0 +1,1 @@
+fix(core): sql literal used as a where value throws "'x' is not a valid integer" for values inside it
