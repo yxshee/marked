@@ -1,4 +1,4 @@
-From 5bb12f0e62d3cddc01eedbad0a1fb0e49f8a85b1 Mon Sep 17 00:00:00 2001
+From e0a0599d931c4baa7a29cd18ceb1f9b6612909ac Mon Sep 17 00:00:00 2001
 From: yxshee <84263676+yxshee@users.noreply.github.com>
 Date: Mon, 2 Nov 2026 12:05:35 +0000
 Subject: [PATCH] fix(core): don't validate values interpolated in a sql
@@ -6,8 +6,9 @@ Subject: [PATCH] fix(core): don't validate values interpolated in a sql
 
 ---
  .../query-generator-internal.ts               |  5 +++-
+ .../src/abstract-dialect/where-sql-builder.ts |  7 ++++--
  packages/core/test/unit/sql/where.test.ts     | 25 +++++++++++++++++++
- 2 files changed, 29 insertions(+), 1 deletion(-)
+ 3 files changed, 34 insertions(+), 3 deletions(-)
 
 diff --git a/packages/core/src/abstract-dialect/query-generator-internal.ts b/packages/core/src/abstract-dialect/query-generator-internal.ts
 index e14fe6c..e05aa8f 100644
@@ -28,6 +29,31 @@ index e14fe6c..e05aa8f 100644
          }
  
          return part;
+diff --git a/packages/core/src/abstract-dialect/where-sql-builder.ts b/packages/core/src/abstract-dialect/where-sql-builder.ts
+index d65d5b6..6326d7b 100644
+--- a/packages/core/src/abstract-dialect/where-sql-builder.ts
++++ b/packages/core/src/abstract-dialect/where-sql-builder.ts
+@@ -10,7 +10,6 @@ import { Col } from '../expression-builders/col.js';
+ import { JsonPath } from '../expression-builders/json-path.js';
+ import { SQL_NULL } from '../expression-builders/json-sql-null.js';
+ import { Literal } from '../expression-builders/literal.js';
+-import { Value } from '../expression-builders/value.js';
+ import { Where } from '../expression-builders/where.js';
+ import type { AbstractDialect, Expression, ModelDefinition, WhereOptions } from '../index.js';
+ import { Op } from '../operators';
+@@ -670,7 +669,11 @@ export class WhereSqlBuilder {
+       literalBuilder.push(escapedPercent, ', ');
+     }
+ 
+-    literalBuilder.push(new Value(right));
++    // The value is compared to the attribute, so it is escaped (and validated) using the attribute's type.
++    // This is done here because the values interpolated in a literal are escaped without a type.
++    literalBuilder.push(
++      this.#queryGenerator.escape(right, { ...options, type: rightDataType ?? leftDataType }),
++    );
+ 
+     if (end) {
+       literalBuilder.push(', ', escapedPercent);
 diff --git a/packages/core/test/unit/sql/where.test.ts b/packages/core/test/unit/sql/where.test.ts
 index 759ff6a..2daad25 100644
 --- a/packages/core/test/unit/sql/where.test.ts

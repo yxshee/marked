@@ -31,6 +31,8 @@ queryGenerator.whereQuery({ name: sql`CONCAT(${'a'}, ${1})` }, { model: User });
 
 `formatFn` and `formatDialectAwareFn` already drop `type` from the escape options for their arguments, with the comment "arguments of a function can be anything, it's not necessarily the type of the attribute". `formatLiteral` passed the options through unchanged. This PR does the same thing there: the pieces of a literal are formatted without the attribute's `type`, and every other escape option (replacements, model, bind collector, ...) is kept.
 
+`Op.startsWith`, `Op.endsWith` and `Op.substring` (and their `not` versions) wrap a non-string value in an internal `CONCAT(...)` literal, and that value is compared to the attribute, so it should keep being validated with the attribute's type. `formatSubstring` now escapes that value with the attribute's type itself when it builds the literal, so those operators behave exactly as before, including the existing "`{ [Op.any]: [ 'test' ] }` is not a valid string" errors.
+
 Tests added in `test/unit/sql/where.test.ts`, next to the existing `{ intAttr1: literal('literal') }` case: a string inside a literal compared to an integer attribute (with `=` and with `Op.gt`), and a number inside a literal compared to a string attribute.
 
 ## List of Breaking Changes
