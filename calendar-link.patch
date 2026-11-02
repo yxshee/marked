@@ -1,0 +1,102 @@
+From 3e8655c826d299d66af057bca5317b979dc8a014 Mon Sep 17 00:00:00 2001
+From: yxshee <84263676+yxshee@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 12:32:33 +0000
+Subject: [PATCH] :bug: Escape text values in ics links
+
+The description and location escaping meant to put a backslash before
+commas and semicolons, but "\," in a JS string is just ",", so it
+did nothing. Backslashes were not escaped either, so a path like
+C:\new showed up with a line break, and the title was not escaped at
+all, so a line break in it started a new property in the file.
+
+Escape backslashes, semicolons, commas and line breaks in SUMMARY,
+DESCRIPTION and LOCATION as RFC 5545 asks for TEXT values.
+---
+ src/index.spec.ts | 21 +++++++++++++++++++++
+ src/index.ts      | 29 +++++++++++++++--------------
+ 2 files changed, 36 insertions(+), 14 deletions(-)
+
+diff --git a/src/index.spec.ts b/src/index.spec.ts
+index 37a20c3..b51209e 100644
+--- a/src/index.spec.ts
++++ b/src/index.spec.ts
+@@ -11,6 +11,27 @@ import {
+ } from "./index";
+ import { CalendarEvent } from "./interfaces";
+ 
++describe("ics text values", () => {
++  test("escape backslashes, semicolons, commas and line breaks", () => {
++    const link = decodeURIComponent(
++      ics({
++        title: "Standup\nDTSTART:20300101T000000Z",
++        description: "Files are in C:\\new\\data; bring a laptop, charger",
++        location: "Room 4, Floor 2",
++        start: "2019-12-29T10:00:00Z",
++        duration: [1, "hour"],
++      })
++    );
++
++    expect(link).toContain("SUMMARY:Standup\\nDTSTART:20300101T000000Z\r\n");
++    expect(link).toContain(
++      "DESCRIPTION:Files are in C:\\\\new\\\\data\\; bring a laptop\\, charger\r\n"
++    );
++    expect(link).toContain("LOCATION:Room 4\\, Floor 2\r\n");
++    expect(link.match(/^DTSTART:/gm)).toHaveLength(1);
++  });
++});
++
+ describe("all-day events", () => {
+   test("ics date-only events are timezone-stable", () => {
+     const link = ics({ title: "Dec 29", start: "2025-12-29", allDay: true });
+diff --git a/src/index.ts b/src/index.ts
+index f347df8..5d8417a 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -210,21 +210,22 @@ export const msTeams = (calendarEvent: CalendarEvent): string => {
+   return `https://teams.microsoft.com/l/meeting/new?${stringify(details)}`;
+ };
+ 
++// Escapes a TEXT property value (RFC 5545, section 3.3.11): a backslash, semicolon or comma
++// gets a backslash in front of it, and a line break becomes "\n" so that it can't end the
++// property line. Whitespace at the start of a line is dropped, as before.
++const escapeIcsText = (text: string): string =>
++  text
++    .replace(/\\/g, "\\\\")
++    .replace(/;/g, "\\;")
++    .replace(/,/g, "\\,")
++    .replace(/\r\n?/g, "\n")
++    .replace(/\n[^\S\n]+/g, "\n")
++    .replace(/\n/g, "\\n");
++
+ export const ics = (calendarEvent: CalendarEvent): string => {
+   const event = eventify(calendarEvent);
+-  const formattedDescription: string = (event.description || "")
+-    .replace(/,/gm, ",")
+-    .replace(/;/gm, ";")
+-    .replace(/\r\n/gm, "\n")
+-    .replace(/\n/gm, "\\n")
+-    .replace(/(\\n)[\s\t]+/gm, "\\n");
+-
+-  const formattedLocation: string = (event.location || "")
+-    .replace(/,/gm, ",")
+-    .replace(/;/gm, ";")
+-    .replace(/\r\n/gm, "\n")
+-    .replace(/\n/gm, "\\n")
+-    .replace(/(\\n)[\s\t]+/gm, "\\n");
++  const formattedDescription: string = escapeIcsText(event.description || "");
++  const formattedLocation: string = escapeIcsText(event.location || "");
+ 
+   const { start, end } = formatTimes(event, event.allDay ? "allDay" : "dateTimeUTC");
+   const dateStamp = dayjs(new Date()).utc().format(TimeFormats["dateTimeUTC"]);
+@@ -276,7 +277,7 @@ export const ics = (calendarEvent: CalendarEvent): string => {
+     },
+     {
+       key: "SUMMARY",
+-      value: event.title,
++      value: escapeIcsText(event.title || ""),
+     },
+     {
+       key: "DESCRIPTION",
+-- 
+2.43.0
+
